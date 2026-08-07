@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <!-- Faz popup.css / popup.js resolverem a partir da raiz da extensao. -->
+    <base href="../../" />
+    <title>Preview do popup</title>
+  </head>
+  <body>
+    <script>
+      /* Stub da API chrome para renderizar o popup fora da extensao (apenas para screenshots). */
+      const state = new URLSearchParams(location.search).get('state') || 'idle';
+      const listeners = [];
+
+      const fakeTab = state === 'blocked'
+        ? { id: 1, url: 'chrome://extensions/', title: 'Extensões' }
+        : { id: 1, url: 'https://stripe.com/br/payments', title: 'Pagamentos online — Stripe' };
+
+      window.chrome = {
+        tabs: { query: async () => [fakeTab] },
+        runtime: {
+          onMessage: { addListener: (fn) => listeners.push(fn) },
+          sendMessage: async (msg) => (msg.type === 'WEB_CLONER_GET_STATE' ? null : { ok: true })
+        }
+      };
+
+      const SCENARIOS = {
+        running: {
+          type: 'WEB_CLONER_PROGRESS', state: 'running', percent: 61,
+          step: 'assets', message: 'Baixando assets… 34/57'
+        },
+        done: {
+          type: 'WEB_CLONER_PROGRESS', state: 'done', percent: 100, step: 'done',
+          message: 'Download concluído: clone-stripe.com-20260806-2312.zip',
+          summary: {
+            fileName: 'clone-stripe.com-20260806-2312.zip',
+            assetsOk: 54, assetsFailed: 3, stylesheets: 7,
+            shadowRoots: 2, canvases: 1, sizeMb: '4.8'
+          }
+        },
+        error: {
+          type: 'WEB_CLONER_PROGRESS', state: 'error', percent: 100, step: 'error',
+          message: 'Esta página é protegida pelo navegador e não permite a injeção de scripts.'
+        }
+      };
+
+      (async () => {
+        const html = await (await fetch('popup.html')).text();
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+
+        const css = document.createElement('link');
+        css.rel = 'stylesheet';
+        css.href = 'popup.css';
+        document.head.appendChild(css);
+        document.body.innerHTML = doc.body.innerHTML;
+
+        await new Promise((resolve) => {
+          const script = document.createElement('script');
+          script.src = 'popup.js';
+          script.onload = resolve;
+          document.body.appendChild(script);
+        });
+
+        await new Promise((r) => setTimeout(r, 120));
+        if (SCENARIOS[state]) listeners.forEach((fn) => fn(SCENARIOS[state]));
+        document.title = 'pronto';
+      })();
+    </script>
+  </body>
+</html>

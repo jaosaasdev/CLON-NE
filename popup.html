@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <title>Web Cloner Avançado</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div class="brand">
+          <div class="brand__mark">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3" y="3" width="13" height="13" rx="3" class="mark-back" />
+              <rect x="8" y="8" width="13" height="13" rx="3" class="mark-front" />
+              <path d="M14.5 11.5v5m0 0 -2 -2m2 2 2 -2" class="mark-arrow" />
+            </svg>
+          </div>
+          <div class="brand__text">
+            <h1>Web Cloner</h1>
+            <span>Captura avançada de interface</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="target" id="target">
+        <img class="target__icon" id="targetIcon" alt="" />
+        <div class="target__info">
+          <span class="target__host" id="targetHost">Carregando aba…</span>
+          <span class="target__title" id="targetTitle"></span>
+        </div>
+      </section>
+
+      <div class="alert alert--blocked" id="blockedAlert" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7.5v5.5" />
+          <circle cx="12" cy="16.5" r="1" fill="currentColor" stroke="none" />
+        </svg>
+        <div>
+          <strong>Página protegida</strong>
+          <p id="blockedReason">
+            O Chrome bloqueia a injeção de scripts nesta aba. Abra um site comum (http ou https)
+            para usar o clonador.
+          </p>
+        </div>
+      </div>
+
+      <button class="cta" id="cloneButton" type="button">
+        <span class="cta__spinner" aria-hidden="true"></span>
+        <span class="cta__label">Clonar Página Atual</span>
+      </button>
+
+      <section class="progress" id="progressPanel" hidden>
+        <div class="progress__bar">
+          <div class="progress__fill" id="progressFill"></div>
+        </div>
+        <p class="progress__message" id="progressMessage">Iniciando…</p>
+
+        <ol class="steps" id="steps">
+          <li class="step" data-step="dom"><i></i><span>Analisando DOM</span></li>
+          <li class="step" data-step="css"><i></i><span>Extraindo CSS e fontes</span></li>
+          <li class="step" data-step="assets"><i></i><span>Baixando assets</span></li>
+          <li class="step" data-step="zip"><i></i><span>Empacotando ZIP</span></li>
+          <li class="step" data-step="download"><i></i><span>Download</span></li>
+        </ol>
+      </section>
+
+      <section class="result result--ok" id="successPanel" hidden>
+        <div class="result__head">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" />
+            <path d="m8.5 12.2 2.4 2.4 4.6 -5" />
+          </svg>
+          <strong>Download concluído</strong>
+        </div>
+        <code class="result__file" id="resultFile"></code>
+        <ul class="stats" id="resultStats"></ul>
+      </section>
+
+      <section class="alert alert--error" id="errorPanel" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7.5v5.5" />
+          <circle cx="12" cy="16.5" r="1" fill="currentColor" stroke="none" />
+        </svg>
+        <div>
+          <strong>Não foi possível clonar</strong>
+          <p id="errorMessage"></p>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span>HTML • CSS • Fontes • Imagens</span>
+        <button class="link" id="resetButton" type="button" hidden>Nova clonagem</button>
+      </footer>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

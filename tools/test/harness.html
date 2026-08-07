@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <title>Web Cloner — harness de testes</title>
+
+    <!-- Folha inline que deve ser consolidada no styles.css -->
+    <style>
+      .fixture {
+        background-image: url("./img/hero.png");
+        font-family: "Fixture";
+      }
+      @font-face {
+        font-family: "Fixture";
+        src: url("../fonts/fixture.woff2") format("woff2"),
+             url("../fonts/fixture.woff") format("woff");
+      }
+      :root {
+        --icon-font: url("/static/icone.ttf");
+      }
+    </style>
+    <link rel="stylesheet" href="externa.css" />
+    <link rel="preload" as="script" href="nao-deve-sobreviver.js" />
+  </head>
+
+  <body>
+    <div id="fixture" class="fixture">
+      <img id="logo" src="img/logo.png" srcset="img/logo.png 1x, img/logo@2x.png 2x" alt="logo" />
+      <div id="bg" style="background-image:url('img/fundo.jpg')"></div>
+
+      <form id="form">
+        <input id="texto" type="text" />
+        <input id="senha" type="password" />
+        <input id="check" type="checkbox" />
+        <textarea id="area"></textarea>
+        <select id="select">
+          <option value="a">A</option>
+          <option value="b">B</option>
+        </select>
+      </form>
+
+      <canvas id="canvas" width="40" height="20"></canvas>
+
+      <svg id="icone" width="24" height="24"><use href="sprite.svg#icone-estrela" /></svg>
+
+      <my-card id="card">
+        <span slot="titulo">Título vindo da light DOM</span>
+      </my-card>
+
+      <iframe src="https://doubleclick.net/anuncio"></iframe>
+      <grammarly-extension data-injected="true"></grammarly-extension>
+    </div>
+
+    <pre id="out"></pre>
+
+    <script src="fixture-setup.js"></script>
+    <script src="../../content.js"></script>
+    <script src="../../libs/jszip.min.js"></script>
+    <script src="../../background.js"></script>
+    <script src="run-tests.js"></script>
+  </body>
+</html>

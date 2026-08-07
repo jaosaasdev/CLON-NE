@@ -1,0 +1,28 @@
+# Sistema
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editores / IDE
+.cursor/
+.vscode/
+*.swp
+*.swo
+
+# Python (scripts auxiliares em tools/)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Perfis e caches locais de testes headless
+tools/test/.profiles/
+*.log
+
+# Secrets
+.env
+.env.*
+!.env.example
+credentials.json
+*.pem

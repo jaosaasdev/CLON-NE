@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <title>Web Cloner — documento offscreen</title>
+  </head>
+  <body>
+    <!--
+      Documento invisível criado sob demanda pelo service worker.
+      Serve para um único propósito: converter o .zip (base64) em um blob: URL,
+      porque URL.createObjectURL não existe dentro de um service worker MV3.
+    -->
+    <script src="offscreen.js"></script>
+  </body>
+</html>

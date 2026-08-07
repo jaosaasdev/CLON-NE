@@ -1,0 +1,17 @@
+/* Folha externa real: usada para validar a resolucao de caminhos relativos ao proprio .css */
+
+@charset "utf-8";
+
+@font-face {
+  font-family: "Externa";
+  src: url("assets/externa.woff2") format("woff2");
+}
+
+.externa {
+  background-image: url(img/logo.png);
+  border-image: url("../test/img/borda.svg") 30;
+}
+
+.externa-quebrada {
+  background: url("https://cdn.invalido.exemplo/nao-existe.png") no-repeat;
+}
