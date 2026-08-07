@@ -8,7 +8,18 @@ Painel Next.js (App Router) + Tailwind + Supabase para listar e baixar sites clo
 npx create-next-app@latest dashboard --typescript --tailwind --eslint --app --src-dir=false --import-alias "@/*" --turbopack --use-npm --yes
 ```
 
+## Produção (Railway)
+
+Painel: https://dashboard-production-e51e.up.railway.app
+
+Para apontar a extensão para outro domínio:
+
+```bash
+node tools/set-panel-url.js https://SEU-DOMINIO.up.railway.app
+```
+
 ## Setup local
+
 
 1. Copie as variáveis:
 

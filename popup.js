@@ -7,8 +7,8 @@
 
 'use strict';
 
-/** Mesma URL do painel usada no background — troque juntas ao publicar. */
-const PANEL_URL = 'http://localhost:3000/';
+/** URL do painel — vem de config.js (única fonte de verdade). */
+const PANEL_URL = (self.WCLONER_CONFIG && self.WCLONER_CONFIG.PANEL_URL) || 'http://localhost:3000/';
 
 const ui = {
   target: document.getElementById('target'),
@@ -170,6 +170,9 @@ function render(state) {
 // ---------------------------------------------------------------------------
 
 async function init() {
+  // Garante o href do botão "Abrir Painel" mesmo antes de um clone bem-sucedido.
+  if (ui.openPanelButton) ui.openPanelButton.href = PANEL_URL;
+
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   activeTab = tab;
   renderTarget(tab);

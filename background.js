@@ -17,22 +17,15 @@
 'use strict';
 
 importScripts('libs/jszip.min.js');
+importScripts('config.js');
 
 // ---------------------------------------------------------------------------
-// Configuração do Painel (troque ao publicar em produção)
+// Configuração do Painel (centralizada em config.js)
 // ---------------------------------------------------------------------------
 
-/** Endpoint POST que recebe FormData { title, url, file }. */
-const API_URL = 'http://localhost:3000/api/save-clone';
-
-/** URL aberta pelo botão "Abrir Painel" no popup. */
-const PANEL_URL = 'http://localhost:3000/';
-
-/**
- * Opcional: mesmo valor de CLONE_API_SECRET do dashboard/.env.local.
- * Deixe vazio se o painel não exigir o header.
- */
-const CLONE_API_SECRET = '';
+const API_URL = self.WCLONER_CONFIG.API_URL;
+const PANEL_URL = self.WCLONER_CONFIG.PANEL_URL;
+const CLONE_API_SECRET = self.WCLONER_CONFIG.CLONE_API_SECRET || '';
 
 /** Timeout do upload (ZIPs grandes precisam de margem). */
 const UPLOAD_TIMEOUT_MS = 120000;
