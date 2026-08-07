@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Web Cloner Avançado",
-  "version": "1.1.0",
-  "description": "Clona a interface estática da aba atual e envia o .zip para o Painel Web Cloner. Em caso de falha no servidor, permite download local de emergência.",
+  "version": "1.2.0",
+  "description": "Clona o site completo (multi-página) com HTML, CSS, fontes, imagens e mídia. Envia o .zip ao Painel; se falhar, permite download local.",
   "minimum_chrome_version": "116",
   "permissions": [
     "activeTab",
+    "tabs",
     "scripting",
     "downloads",
     "offscreen",

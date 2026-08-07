@@ -1,8 +1,8 @@
 /**
  * background.js — Service worker (Manifest V3).
  *
- * Orquestra o pipeline de clonagem:
- *   popup  ->  content.js  ->  CSS/assets  ->  JSZip
+ * Orquestra o pipeline de clonagem multi-página:
+ *   popup  ->  crawl (abas)  ->  content.js  ->  CSS/assets  ->  JSZip
  *          ->  POST /api/save-clone (Painel Next.js)
  *          ->  fallback: chrome.downloads.download se o painel falhar
  *
@@ -34,8 +34,9 @@ const UPLOAD_TIMEOUT_MS = 120000;
 // Constantes
 // ---------------------------------------------------------------------------
 
-const ASSET_TOKEN_RE = /__WCLONE_(?:ASSET|CSSASSET)_\d+__/g;
+const ASSET_TOKEN_RE = /__WCLONE_(?:ASSET|CSSASSET|MERGED)_\d+__/g;
 const FONT_EXT = /\.(woff2?|ttf|otf|eot|sfnt)(\?|#|$)/i;
+const MEDIA_EXT = /\.(mp4|webm|ogg|mp3|wav|m4a|mov)(\?|#|$)/i;
 
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_PARALLEL_DOWNLOADS = 8;
@@ -50,8 +51,16 @@ const MIME_EXT = {
   'font/woff': 'woff', 'font/woff2': 'woff2', 'font/ttf': 'ttf', 'font/otf': 'otf',
   'application/font-woff': 'woff', 'application/font-woff2': 'woff2',
   'application/x-font-ttf': 'ttf', 'application/x-font-otf': 'otf',
-  'application/vnd.ms-fontobject': 'eot'
+  'application/vnd.ms-fontobject': 'eot',
+  'video/mp4': 'mp4', 'video/webm': 'webm', 'video/ogg': 'ogv',
+  'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/ogg': 'ogg',
+  'application/json': 'json', 'text/json': 'json'
 };
+
+/** Limites do crawler multi-página (mesmo domínio). */
+const MAX_PAGES = 30;
+const PAGE_SETTLE_MS = 1000;
+const TAB_LOAD_TIMEOUT_MS = 45000;
 
 /** URLs em que o Chrome proíbe injeção de script (regra de negócio nº 2 do PRD). */
 const BLOCKED_URL_PATTERNS = [
@@ -160,32 +169,62 @@ async function runPool(items, limit, worker) {
  * Reúne os tokens criados pelo content.js (HTML) e os criados aqui (CSS) em um único mapa,
  * deduplicando por URL absoluta para que cada arquivo seja baixado uma só vez.
  */
-function createRegistry(initialTokens) {
+function createRegistry() {
   const tokens = new Map();
   const byUrl = new Map();
   let seq = 0;
 
-  for (const [token, info] of Object.entries(initialTokens || {})) {
-    if (!info || !info.url) continue;
-    tokens.set(token, { url: info.url, kind: info.kind || 'image' });
-    if (!byUrl.has(info.url)) byUrl.set(info.url, token);
+  function promoteKind(info, kind) {
+    if (!kind || !info) return;
+    if (kind === 'font' || kind === 'media' || kind === 'sprite') info.kind = kind;
+  }
+
+  function inferKind(abs, kind) {
+    if (kind) return kind;
+    if (FONT_EXT.test(abs)) return 'font';
+    if (MEDIA_EXT.test(abs)) return 'media';
+    return 'image';
   }
 
   return {
     tokens,
+    /**
+     * Importa tokens de uma página. Como cada content.js reinicia a numeração,
+     * reescreve colisões e devolve um mapa pageToken → globalToken.
+     */
+    importPageTokens(pageTokens) {
+      const remap = {};
+      for (const [token, info] of Object.entries(pageTokens || {})) {
+        if (!info || !info.url) continue;
+        let global = byUrl.get(info.url);
+        if (!global) {
+          if (!tokens.has(token)) {
+            global = token;
+          } else {
+            global = `__WCLONE_MERGED_${seq++}__`;
+          }
+          tokens.set(global, { url: info.url, kind: inferKind(info.url, info.kind) });
+          byUrl.set(info.url, global);
+        } else {
+          promoteKind(tokens.get(global), info.kind);
+        }
+        if (global !== token) remap[token] = global;
+      }
+      return remap;
+    },
     add(rawUrl, baseUrl, kind) {
       const abs = toAbsolute(rawUrl, baseUrl);
       if (!abs) return null;
 
       const existing = byUrl.get(abs);
       if (existing) {
-        if (kind === 'font') tokens.get(existing).kind = 'font';
+        promoteKind(tokens.get(existing), kind);
         return existing;
       }
 
       const token = `__WCLONE_CSSASSET_${seq++}__`;
       byUrl.set(abs, token);
-      tokens.set(token, { url: abs, kind: kind || (FONT_EXT.test(abs) ? 'font' : 'image') });
+      tokens.set(token, { url: abs, kind: inferKind(abs, kind) });
       return token;
     },
     markFont(absUrl) {
@@ -355,7 +394,9 @@ function buildFileName(url, contentType, kind, usedNames) {
   } catch { /* nome gerado abaixo */ }
 
   base = base.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '');
-  if (!base) base = kind === 'font' ? 'fonte' : 'imagem';
+  if (!base) {
+    base = kind === 'font' ? 'fonte' : kind === 'media' ? 'midia' : 'imagem';
+  }
 
   const dotIndex = base.lastIndexOf('.');
   let stem = dotIndex > 0 ? base.slice(0, dotIndex) : base;
@@ -363,10 +404,10 @@ function buildFileName(url, contentType, kind, usedNames) {
 
   if (!/^[a-z0-9]{2,5}$/.test(ext)) {
     const mime = (contentType || '').split(';')[0].trim().toLowerCase();
-    ext = MIME_EXT[mime] || (kind === 'font' ? 'woff2' : 'png');
+    ext = MIME_EXT[mime] || (kind === 'font' ? 'woff2' : kind === 'media' ? 'mp4' : 'png');
   }
 
-  stem = stem.slice(0, 60) || (kind === 'font' ? 'fonte' : 'imagem');
+  stem = stem.slice(0, 60) || (kind === 'font' ? 'fonte' : kind === 'media' ? 'midia' : 'imagem');
 
   let candidate = `${stem}.${ext}`;
   let counter = 2;
@@ -378,14 +419,13 @@ function buildFileName(url, contentType, kind, usedNames) {
 }
 
 /**
- * Baixa todos os assets registrados e devolve o mapa token -> substituição final.
- * Sucesso  -> caminho relativo dentro do .zip.
- * Falha    -> URL absoluta original (fallback silencioso exigido pelo PRD).
+ * Baixa todos os assets registrados e devolve o mapa token -> caminho no ZIP
+ * (sem prefixo ./ — o prefixo relativo é aplicado por página).
  */
 async function downloadAssets(registry, zip, report, onProgress) {
   const entries = Array.from(registry.tokens.entries());
   const resolved = new Map();
-  const usedNames = { image: new Set(), font: new Set() };
+  const usedNames = { image: new Set(), font: new Set(), media: new Set() };
   const pathByUrl = new Map();
   const sprites = new Map();
 
@@ -395,7 +435,6 @@ async function downloadAssets(registry, zip, report, onProgress) {
   let failCount = 0;
 
   await runPool(entries, MAX_PARALLEL_DOWNLOADS, async ([token, info]) => {
-    // Deduplicação: a mesma URL pode ter recebido tokens diferentes em HTML e CSS.
     if (pathByUrl.has(info.url)) {
       resolved.set(token, pathByUrl.get(info.url));
       completed++;
@@ -413,30 +452,28 @@ async function downloadAssets(registry, zip, report, onProgress) {
       if (totalBytes + buffer.byteLength > MAX_TOTAL_BYTES) throw new Error('limite total atingido');
 
       const contentType = response.headers.get('content-type') || '';
-      // Uma resposta HTML normalmente significa página de erro/login, não o asset.
       if (/^text\/html/i.test(contentType)) throw new Error('resposta HTML inesperada');
 
       const isFont = info.kind === 'font' || /^(font|application\/(x-)?font)/i.test(contentType);
-      const folder = isFont ? 'fonts' : 'images';
-      const fileName = buildFileName(info.url, contentType, isFont ? 'font' : 'image', usedNames[isFont ? 'font' : 'image']);
+      const isMedia =
+        info.kind === 'media' ||
+        /^(video|audio)\//i.test(contentType);
+      const kind = isFont ? 'font' : isMedia ? 'media' : 'image';
+      const folder = kind === 'font' ? 'fonts' : kind === 'media' ? 'media' : 'images';
+      const fileName = buildFileName(info.url, contentType, kind, usedNames[kind]);
       const zipPath = `assets/${folder}/${fileName}`;
 
       zip.file(zipPath, buffer);
       totalBytes += buffer.byteLength;
       okCount++;
 
-      // Sprites SVG referenciados por <use> são guardados como texto para serem embutidos
-      // no index.html (um <use> apontando para arquivo externo não funciona em file://).
       if (info.kind === 'sprite' && (/svg/i.test(contentType) || /\.svg$/i.test(zipPath))) {
-        sprites.set(info.url, { text: new TextDecoder('utf-8').decode(buffer), path: `./${zipPath}` });
+        sprites.set(info.url, { text: new TextDecoder('utf-8').decode(buffer), path: zipPath });
       }
 
-      // Caminho relativo válido tanto a partir de /index.html quanto de /styles.css.
-      const relative = `./${zipPath}`;
-      pathByUrl.set(info.url, relative);
-      resolved.set(token, relative);
+      pathByUrl.set(info.url, zipPath);
+      resolved.set(token, zipPath);
     } catch (error) {
-      // REGRA DE NEGÓCIO: falhas de CORS/rede são silenciosas; mantemos a URL absoluta.
       failCount++;
       report.warn(`Asset mantido como URL remota (${error.message}): ${info.url}`);
       pathByUrl.set(info.url, info.url);
@@ -489,18 +526,152 @@ function inlineSvgSprites(html, sprites) {
 
 /**
  * Troca os tokens pelo caminho final.
- * Em HTML escapamos apenas `"`, `<` e `>`: o `&` é deixado intacto de propósito, porque o
- * mesmo texto pode estar dentro de um <style> (onde entidades HTML não são interpretadas)
- * e porque o parser HTML5 já trata `&param=` literalmente dentro de atributos.
+ * `pathPrefix` (ex.: "./" ou "../") é aplicado só em caminhos locais do ZIP.
  */
-function replaceTokens(text, resolved, { escapeHtml }) {
+function replaceTokens(text, resolved, { escapeHtml, pathPrefix = './' }) {
   return text.replace(ASSET_TOKEN_RE, (token) => {
     const value = resolved.get(token);
     if (value === undefined) return token;
-    // Aspas são percent-encodadas para nunca fecharem o atributo HTML nem o url() do CSS.
-    const safe = value.replace(/"/g, '%22').replace(/'/g, '%27');
+    const path = /^https?:\/\//i.test(value) || value.startsWith('data:')
+      ? value
+      : `${pathPrefix}${value.replace(/^\.\//, '')}`;
+    const safe = path.replace(/"/g, '%22').replace(/'/g, '%27');
     return escapeHtml ? safe.replace(/</g, '%3C').replace(/>/g, '%3E') : safe;
   });
+}
+
+function applyTokenRemap(text, remap) {
+  let out = text;
+  for (const [from, to] of Object.entries(remap || {})) {
+    if (from && to && from !== to) out = out.split(from).join(to);
+  }
+  return out;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizePageUrl(href) {
+  try {
+    const u = new URL(href);
+    u.hash = '';
+    if (/\/index\.html?$/i.test(u.pathname)) {
+      u.pathname = u.pathname.replace(/\/index\.html?$/i, '/');
+    }
+    return u.href;
+  } catch {
+    return null;
+  }
+}
+
+function pageUrlToZipPath(pageUrl, rootUrl) {
+  const pageKey = normalizePageUrl(pageUrl);
+  const rootKey = normalizePageUrl(rootUrl);
+  if (!pageKey) return 'index.html';
+  if (pageKey === rootKey) return 'index.html';
+
+  let path = '/';
+  try {
+    path = new URL(pageUrl).pathname || '/';
+  } catch {
+    return 'index.html';
+  }
+
+  if (path === '/' || path === '') return 'index.html';
+  if (/\.html?$/i.test(path)) return path.replace(/^\//, '');
+  if (path.endsWith('/')) return `${path.replace(/^\//, '')}index.html`;
+  return `${path.replace(/^\//, '')}/index.html`;
+}
+
+function depthPrefix(zipHtmlPath) {
+  const depth = zipHtmlPath.split('/').length - 1;
+  return depth <= 0 ? './' : '../'.repeat(depth);
+}
+
+function relativeLink(fromZip, toZip) {
+  const fromDir = fromZip.includes('/') ? fromZip.slice(0, fromZip.lastIndexOf('/') + 1) : '';
+  const fromParts = fromDir ? fromDir.replace(/\/$/, '').split('/').filter(Boolean) : [];
+  const toParts = toZip.split('/');
+  const toFile = toParts.pop();
+  let i = 0;
+  while (i < fromParts.length && i < toParts.length && fromParts[i] === toParts[i]) i++;
+  const ups = '../'.repeat(fromParts.length - i);
+  const down = [...toParts.slice(i), toFile].join('/');
+  const rel = `${ups}${down}`;
+  return rel.startsWith('.') ? rel : `./${rel}`;
+}
+
+function rewriteInternalLinks(html, pageZipPath, urlToZipPath) {
+  let out = html;
+  const entries = Array.from(urlToZipPath.entries()).sort((a, b) => b[0].length - a[0].length);
+
+  for (const [absUrl, targetZip] of entries) {
+    const rel = relativeLink(pageZipPath, targetZip);
+    const variants = new Set();
+
+    try {
+      const u = new URL(absUrl);
+      variants.add(u.href);
+      const noSlash = u.origin + u.pathname.replace(/\/$/, '') + u.search;
+      const withSlash = u.origin + (u.pathname.endsWith('/') ? u.pathname : `${u.pathname}/`) + u.search;
+      variants.add(noSlash);
+      variants.add(withSlash);
+      // Pathname relativo só se for específico o bastante (evita trocar "/" em todo o HTML).
+      if (u.pathname && u.pathname !== '/' && u.pathname.length > 1) {
+        variants.add(u.pathname + u.search);
+        if (!u.pathname.endsWith('/')) variants.add(`${u.pathname}/` + u.search);
+      }
+    } catch {
+      if (absUrl && absUrl.length > 8) variants.add(absUrl);
+    }
+
+    for (const variant of variants) {
+      if (!variant || variant.length < 8) continue;
+      out = out.split(variant).join(rel);
+    }
+  }
+  return out;
+}
+
+async function waitTabComplete(tabId, timeoutMs = TAB_LOAD_TIMEOUT_MS) {
+  const existing = await chrome.tabs.get(tabId);
+  if (existing.status === 'complete') {
+    await sleep(PAGE_SETTLE_MS);
+    return;
+  }
+
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      reject(new Error('Timeout ao carregar a página para clonagem.'));
+    }, timeoutMs);
+
+    function onUpdated(id, info) {
+      if (id !== tabId || info.status !== 'complete') return;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve();
+    }
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+  });
+
+  await sleep(PAGE_SETTLE_MS);
+}
+
+async function extractFromTab(tabId) {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+  } catch (error) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    throw new Error(describeInjectionError(error, tab?.url || ''));
+  }
+
+  const response = await chrome.tabs.sendMessage(tabId, { type: 'WEB_CLONER_EXTRACT' });
+  if (!response) throw new Error('A página não respondeu à extração. Recarregue e tente novamente.');
+  if (!response.ok) throw new Error(`Falha na extração do DOM: ${response.error}`);
+  return response.payload;
 }
 
 // ---------------------------------------------------------------------------
@@ -668,48 +839,171 @@ async function clonePage(tabId) {
     warn(text) {
       if (warnings.length < 200) warnings.push(text);
     },
-    /** Registra uma folha de estilo que não pôde ser baixada e vira <link> remoto. */
     fallbackStylesheet(url, media) {
       if (!fallbackStylesheets.has(url)) fallbackStylesheets.set(url, (media || '').trim());
     }
   };
 
-  const tab = await chrome.tabs.get(tabId);
-  if (!tab || !tab.url) throw new Error('Não foi possível identificar a aba ativa.');
-  if (BLOCKED_URL_PATTERNS.some((re) => re.test(tab.url))) {
+  const startTab = await chrome.tabs.get(tabId);
+  if (!startTab || !startTab.url) throw new Error('Não foi possível identificar a aba ativa.');
+  if (BLOCKED_URL_PATTERNS.some((re) => re.test(startTab.url))) {
     throw new Error('Esta página é protegida pelo navegador (chrome://, Web Store ou similar) e não pode ser clonada.');
   }
 
-  await publish({ state: 'running', percent: 6, step: 'inject', message: 'Injetando o motor de captura…' });
-  try {
-    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
-  } catch (error) {
-    throw new Error(describeInjectionError(error, tab.url));
-  }
-
-  await publish({ state: 'running', percent: 14, step: 'dom', message: 'Analisando DOM, Shadow DOM e formulários…' });
-  const response = await chrome.tabs.sendMessage(tabId, { type: 'WEB_CLONER_EXTRACT' });
-  if (!response) throw new Error('A página não respondeu à extração. Recarregue a aba e tente novamente.');
-  if (!response.ok) throw new Error(`Falha na extração do DOM: ${response.error}`);
-
-  const payload = response.payload;
-  const registry = createRegistry(payload.assets);
+  const rootUrl = startTab.url;
+  const rootOrigin = new URL(rootUrl).origin;
+  const registry = createRegistry();
   const zip = new JSZip();
+  const allCssParts = [];
+  const capturedPages = [];
+  const urlToZipPath = new Map();
+  const visited = new Set();
+  const queue = [rootUrl];
+
+  let aggregateStats = {
+    shadowRoots: 0,
+    canvases: 0,
+    formFields: 0,
+    scriptsRemoved: 0,
+    adsRemoved: 0,
+    injectedRemoved: 0,
+    computedBackgrounds: 0
+  };
 
   await publish({
     state: 'running',
-    percent: 26,
-    step: 'css',
-    message: `Consolidando CSS (${payload.cssParts.length} folhas) e extraindo @font-face…`
+    percent: 4,
+    step: 'crawl',
+    message: 'Iniciando captura do site (multi-página)…'
   });
-  let css = await buildStylesheet(payload.cssParts, registry, report);
+
+  while (queue.length && capturedPages.length < MAX_PAGES) {
+    const nextUrl = queue.shift();
+    const key = normalizePageUrl(nextUrl);
+    if (!key || visited.has(key)) continue;
+
+    let pageOrigin = '';
+    try {
+      pageOrigin = new URL(key).origin;
+    } catch {
+      continue;
+    }
+    if (pageOrigin !== rootOrigin) continue;
+    if (BLOCKED_URL_PATTERNS.some((re) => re.test(key))) continue;
+
+    visited.add(key);
+    const pageIndex = capturedPages.length + 1;
+    const isFirst = capturedPages.length === 0;
+
+    await publish({
+      state: 'running',
+      percent: 4 + Math.min(48, Math.round((capturedPages.length / MAX_PAGES) * 48)),
+      step: 'crawl',
+      message: `Capturando página ${pageIndex}… ${key.replace(rootOrigin, '') || '/'}`
+    });
+
+    let workerTabId = null;
+    let payload = null;
+
+    try {
+      if (isFirst) {
+        workerTabId = tabId;
+        await publish({ state: 'running', percent: 8, step: 'dom', message: 'Analisando DOM da página inicial…' });
+        payload = await extractFromTab(workerTabId);
+      } else {
+        const created = await chrome.tabs.create({ url: key, active: false });
+        workerTabId = created.id;
+        await waitTabComplete(workerTabId);
+        payload = await extractFromTab(workerTabId);
+      }
+    } catch (error) {
+      report.warn(`Página ignorada (${error.message}): ${key}`);
+      if (!isFirst && workerTabId) {
+        try { await chrome.tabs.remove(workerTabId); } catch { /* ignore */ }
+      }
+      if (isFirst) throw error;
+      continue;
+    } finally {
+      if (!isFirst && workerTabId) {
+        try { await chrome.tabs.remove(workerTabId); } catch { /* ignore */ }
+      }
+    }
+
+    const pageZipPath = pageUrlToZipPath(payload.pageUrl || key, rootUrl);
+    urlToZipPath.set(normalizePageUrl(payload.pageUrl || key), pageZipPath);
+    try {
+      urlToZipPath.set(new URL(payload.pageUrl || key).href, pageZipPath);
+    } catch { /* ignore */ }
+
+    const remap = registry.importPageTokens(payload.assets);
+    let html = applyTokenRemap(payload.html, remap);
+
+    if (Array.isArray(payload.cssParts)) {
+      for (const part of payload.cssParts) allCssParts.push(part);
+    }
+
+    for (const [k, v] of Object.entries(payload.stats || {})) {
+      if (typeof v === 'number') aggregateStats[k] = (aggregateStats[k] || 0) + v;
+    }
+
+    capturedPages.push({
+      zipPath: pageZipPath,
+      html,
+      pageUrl: payload.pageUrl || key,
+      pageTitle: payload.pageTitle || '',
+      stats: payload.stats || {}
+    });
+
+    for (const link of payload.internalLinks || []) {
+      const normalized = normalizePageUrl(link);
+      if (!normalized || visited.has(normalized)) continue;
+      try {
+        if (new URL(normalized).origin !== rootOrigin) continue;
+      } catch {
+        continue;
+      }
+      if (!queue.includes(normalized) && capturedPages.length + queue.length < MAX_PAGES * 2) {
+        queue.push(normalized);
+      }
+    }
+  }
+
+  if (!capturedPages.length) {
+    throw new Error('Nenhuma página pôde ser capturada.');
+  }
+
+  await publish({
+    state: 'running',
+    percent: 54,
+    step: 'css',
+    message: `Consolidando CSS (${allCssParts.length} folhas) de ${capturedPages.length} página(s)…`
+  });
+
+  // Evita repetir a mesma folha externa em cada página do crawl.
+  const dedupedCss = [];
+  const seenCssLinks = new Set();
+  const seenCssText = new Set();
+  for (const part of allCssParts) {
+    if (part.type === 'link') {
+      if (!part.url || seenCssLinks.has(part.url)) continue;
+      seenCssLinks.add(part.url);
+      dedupedCss.push(part);
+      continue;
+    }
+    const textKey = `${(part.text || '').length}:${(part.text || '').slice(0, 120)}`;
+    if (seenCssText.has(textKey)) continue;
+    seenCssText.add(textKey);
+    dedupedCss.push(part);
+  }
+
+  let css = await buildStylesheet(dedupedCss, registry, report);
 
   const assetCount = registry.tokens.size;
   await publish({
     state: 'running',
-    percent: 38,
+    percent: 60,
     step: 'assets',
-    message: `Baixando ${assetCount} assets (imagens e fontes)…`
+    message: `Baixando ${assetCount} assets (imagens, fontes e mídia)…`
   });
 
   const { resolved, okCount, failCount, totalBytes, sprites } = await downloadAssets(
@@ -717,59 +1011,73 @@ async function clonePage(tabId) {
     zip,
     report,
     (done, total) => {
-      // Publica no máximo a cada 3 arquivos para não inundar o storage/popup.
       if (done !== total && done % 3 !== 0) return;
       publish({
         state: 'running',
-        percent: 38 + Math.round((done / Math.max(total, 1)) * 40),
+        percent: 60 + Math.round((done / Math.max(total, 1)) * 22),
         step: 'assets',
         message: `Baixando assets… ${done}/${total}`
       });
     }
   );
 
-  await publish({ state: 'running', percent: 82, step: 'rewrite', message: 'Reescrevendo caminhos relativos…' });
-  let html = replaceTokens(payload.html, resolved, { escapeHtml: true });
-  css = replaceTokens(css, resolved, { escapeHtml: false });
-  html = inlineSvgSprites(html, sprites);
+  await publish({ state: 'running', percent: 84, step: 'rewrite', message: 'Montando páginas e caminhos relativos…' });
 
-  // Substitui o marcador deixado pelo content.js pelos <link> das folhas não baixadas.
   const fallbackTags = Array.from(fallbackStylesheets.entries())
     .map(([url, media]) => {
       const mediaAttr = media && media.toLowerCase() !== 'all' ? ` media="${escapeAttribute(media)}"` : '';
       return `<link rel="stylesheet" href="${escapeAttribute(url)}"${mediaAttr}>`;
     })
     .join('\n');
-  html = html.replace('<!--__WCLONE_FALLBACK_LINKS__-->', fallbackTags);
 
-  zip.file('index.html', html);
-  zip.file('styles.css', `/* Clone de ${payload.pageUrl} — gerado em ${new Date().toISOString()} */\n\n${css}`);
+  for (const page of capturedPages) {
+    const prefix = depthPrefix(page.zipPath);
+    let html = replaceTokens(page.html, resolved, { escapeHtml: true, pathPrefix: prefix });
+    html = inlineSvgSprites(html, sprites);
+    html = html.replace('<!--__WCLONE_FALLBACK_LINKS__-->', fallbackTags);
+    html = html.split('__WCLONE_STYLES_HREF__').join(`${prefix}styles.css`);
+    html = rewriteInternalLinks(html, page.zipPath, urlToZipPath);
+    zip.file(page.zipPath, html);
+  }
+
+  css = replaceTokens(css, resolved, { escapeHtml: false, pathPrefix: './' });
+  zip.file(
+    'styles.css',
+    `/* Clone de ${rootUrl} — ${capturedPages.length} página(s) — ${new Date().toISOString()} */\n\n${css}`
+  );
+
   zip.file(
     'README.txt',
     [
       'Clone gerado pela extensão "Web Cloner Avançado".',
       '',
-      `Origem........: ${payload.pageUrl}`,
-      `Título........: ${payload.pageTitle}`,
+      `Origem........: ${rootUrl}`,
+      `Título........: ${capturedPages[0].pageTitle}`,
       `Gerado em.....: ${new Date().toLocaleString()}`,
+      `Páginas.......: ${capturedPages.length}`,
       '',
       'Conteúdo:',
-      '  index.html          — DOM tratado (formulários, canvas e shadow DOM já resolvidos)',
-      '  styles.css          — todas as folhas de estilo consolidadas',
-      '  assets/images/      — imagens baixadas',
-      '  assets/fonts/       — fontes baixadas',
+      '  index.html (+ pastas) — páginas do mesmo domínio',
+      '  styles.css            — folhas de estilo consolidadas',
+      '  assets/images/        — imagens',
+      '  assets/fonts/         — fontes',
+      '  assets/media/         — vídeos/áudios',
       '',
-      'Estatísticas da captura:',
-      `  Shadow roots achatados....: ${payload.stats.shadowRoots}`,
-      `  Canvas convertidos........: ${payload.stats.canvases}`,
-      `  Campos de formulário......: ${payload.stats.formFields}`,
-      `  Scripts removidos.........: ${payload.stats.scriptsRemoved}`,
-      `  Anúncios/iframes removidos: ${payload.stats.adsRemoved}`,
+      'Páginas capturadas:',
+      ...capturedPages.map((p) => `  - ${p.zipPath}  ←  ${p.pageUrl}`),
+      '',
+      'Estatísticas:',
+      `  Shadow roots achatados....: ${aggregateStats.shadowRoots}`,
+      `  Canvas convertidos........: ${aggregateStats.canvases}`,
+      `  Campos de formulário......: ${aggregateStats.formFields}`,
+      `  Backgrounds computados....: ${aggregateStats.computedBackgrounds || 0}`,
+      `  Scripts removidos.........: ${aggregateStats.scriptsRemoved}`,
+      `  Anúncios/iframes removidos: ${aggregateStats.adsRemoved}`,
       `  Assets baixados...........: ${okCount}`,
       `  Assets mantidos remotos...: ${failCount}`,
       '',
       failCount
-        ? 'Alguns assets não puderam ser baixados (CORS, hotlink protection ou 404).\nSuas URLs absolutas originais foram preservadas no HTML/CSS.'
+        ? 'Alguns assets não puderam ser baixados (CORS, hotlink ou 404).\nURLs absolutas originais foram preservadas.'
         : 'Todos os assets foram baixados com sucesso.',
       '',
       warnings.length ? 'Avisos:\n' + warnings.map((w) => `  - ${w}`).join('\n') : ''
@@ -790,20 +1098,20 @@ async function clonePage(tabId) {
     }
   );
 
-  const fileName = buildZipFileName(payload.pageUrl);
+  const fileName = buildZipFileName(rootUrl);
   const sizeMb = (totalBytes / (1024 * 1024)).toFixed(1);
   const summaryBase = {
     fileName,
+    pages: capturedPages.length,
     assetsOk: okCount,
     assetsFailed: failCount,
     sizeMb,
-    shadowRoots: payload.stats.shadowRoots,
-    canvases: payload.stats.canvases,
-    stylesheets: payload.cssParts.length,
+    shadowRoots: aggregateStats.shadowRoots,
+    canvases: aggregateStats.canvases,
+    stylesheets: dedupedCss.length,
     panelUrl: PANEL_URL
   };
 
-  // Guarda o ZIP em memória ANTES do upload — se o painel falhar, o Plano B ainda funciona.
   pendingFallbackZip = { base64, fileName };
 
   await publish({
@@ -816,25 +1124,23 @@ async function clonePage(tabId) {
   try {
     const blob = base64ToBlob(base64);
     await uploadCloneToPanel({
-      title: payload.pageTitle || tab.title || 'Sem título',
-      url: payload.pageUrl || tab.url,
+      title: capturedPages[0].pageTitle || startTab.title || 'Sem título',
+      url: rootUrl,
       fileName,
       blob
     });
 
-    // Sucesso no painel: limpa o fallback (não precisa mais do download local).
     pendingFallbackZip = null;
 
     await publish({
       state: 'done',
       percent: 100,
       step: 'done',
-      message: 'Sucesso! Site salvo no seu Painel.',
+      message: `Sucesso! ${capturedPages.length} página(s) salvas no Painel.`,
       canFallbackDownload: false,
       summary: { ...summaryBase, uploaded: true }
     });
   } catch (uploadError) {
-    // PLANO B: mantém o ZIP e sinaliza a UI para oferecer "Baixar ZIP Manualmente".
     console.warn('[Web Cloner] Upload ao painel falhou — fallback disponível.', uploadError);
     await publish({
       state: 'error',

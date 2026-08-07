@@ -53,7 +53,7 @@ const BLOCKED_RULES = [
   { re: /^https?:\/\/addons\.mozilla\.org/i, reason: 'A loja de complementos do Firefox bloqueia extensões.' }
 ];
 
-const STEP_ORDER = ['dom', 'css', 'assets', 'zip', 'upload'];
+const STEP_ORDER = ['crawl', 'dom', 'css', 'assets', 'zip', 'upload'];
 const STEP_ALIASES = {
   inject: 'dom',
   rewrite: 'zip',
@@ -108,6 +108,7 @@ function renderSummary(summary) {
   ui.resultStats.innerHTML = '';
 
   const rows = [
+    ['Páginas clonadas', summary.pages],
     ['Assets baixados', summary.assetsOk],
     ['Mantidos remotos', summary.assetsFailed],
     ['Folhas de estilo', summary.stylesheets],

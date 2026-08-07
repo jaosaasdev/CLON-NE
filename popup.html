@@ -18,7 +18,7 @@
           </div>
           <div class="brand__text">
             <h1>Web Cloner</h1>
-            <span>Captura avançada de interface</span>
+            <span>Clone completo do site</span>
           </div>
         </div>
       </header>
@@ -48,7 +48,7 @@
 
       <button class="cta" id="cloneButton" type="button">
         <span class="cta__spinner" aria-hidden="true"></span>
-        <span class="cta__label">Clonar Página Atual</span>
+        <span class="cta__label">Clonar Site Completo</span>
       </button>
 
       <section class="progress" id="progressPanel" hidden>
@@ -58,6 +58,7 @@
         <p class="progress__message" id="progressMessage">Iniciando…</p>
 
         <ol class="steps" id="steps">
+          <li class="step" data-step="crawl"><i></i><span>Varrendo páginas</span></li>
           <li class="step" data-step="dom"><i></i><span>Analisando DOM</span></li>
           <li class="step" data-step="css"><i></i><span>Extraindo CSS e fontes</span></li>
           <li class="step" data-step="assets"><i></i><span>Baixando assets</span></li>
@@ -107,7 +108,7 @@
       </section>
 
       <footer class="footer">
-        <span>HTML • CSS • Fontes • Imagens</span>
+        <span>Multi-página • HTML • CSS • Fontes • Mídia</span>
         <button class="link" id="resetButton" type="button" hidden>Nova clonagem</button>
       </footer>
     </div>
