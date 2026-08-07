@@ -1,12 +1,14 @@
 /**
  * popup.js — camada de interface.
  *
- * Não executa trabalho pesado: apenas valida a aba, dispara o pipeline no service worker
- * e reflete as mensagens de progresso. Assim, fechar o popup no meio do processo não
- * cancela a clonagem (o service worker continua e o download acontece do mesmo jeito).
+ * Não executa trabalho pesado: dispara o pipeline no service worker e reflete o progresso.
+ * Em sucesso: oferece "Abrir Painel". Em falha de upload: oferece "Baixar ZIP Manualmente" (Plano B).
  */
 
 'use strict';
+
+/** Mesma URL do painel usada no background — troque juntas ao publicar. */
+const PANEL_URL = 'http://localhost:3000/';
 
 const ui = {
   target: document.getElementById('target'),
@@ -22,17 +24,21 @@ const ui = {
   progressMessage: document.getElementById('progressMessage'),
   steps: Array.from(document.querySelectorAll('.step')),
   successPanel: document.getElementById('successPanel'),
+  successTitle: document.getElementById('successTitle'),
   resultFile: document.getElementById('resultFile'),
   resultStats: document.getElementById('resultStats'),
+  openPanelButton: document.getElementById('openPanelButton'),
   errorPanel: document.getElementById('errorPanel'),
+  errorTitle: document.getElementById('errorTitle'),
   errorMessage: document.getElementById('errorMessage'),
+  fallbackDownloadButton: document.getElementById('fallbackDownloadButton'),
+  fallbackHint: document.getElementById('fallbackHint'),
   resetButton: document.getElementById('resetButton')
 };
 
 /**
- * REGRA DE NEGÓCIO Nº 2 — páginas protegidas.
- * O Chrome recusa chrome.scripting.executeScript em páginas internas do navegador e nas
- * lojas de extensões. Detectamos isso ANTES do clique para exibir um aviso amigável.
+ * REGRA DE NEGÓCIO — páginas protegidas.
+ * O Chrome recusa chrome.scripting.executeScript em páginas internas e nas lojas.
  */
 const BLOCKED_RULES = [
   { re: /^chrome:\/\//i, reason: 'Páginas internas do Chrome (chrome://) não permitem injeção de scripts.' },
@@ -47,17 +53,25 @@ const BLOCKED_RULES = [
   { re: /^https?:\/\/addons\.mozilla\.org/i, reason: 'A loja de complementos do Firefox bloqueia extensões.' }
 ];
 
-const STEP_ORDER = ['dom', 'css', 'assets', 'zip', 'download'];
-const STEP_ALIASES = { inject: 'dom', rewrite: 'zip', done: 'download', error: null };
+const STEP_ORDER = ['dom', 'css', 'assets', 'zip', 'upload'];
+const STEP_ALIASES = {
+  inject: 'dom',
+  rewrite: 'zip',
+  download: 'upload',
+  done: 'upload',
+  error: null
+};
 
 let activeTab = null;
 let blocked = false;
+let fallbackBusy = false;
 
 // ---------------------------------------------------------------------------
 // Renderização
 // ---------------------------------------------------------------------------
 
 function show(element, visible) {
+  if (!element) return;
   element.hidden = !visible;
 }
 
@@ -65,13 +79,13 @@ function renderTarget(tab) {
   let host = tab?.url || 'Aba desconhecida';
   try {
     const parsed = new URL(tab.url);
-    // Em páginas internas (chrome://…) o hostname sozinho não diz nada — mostramos a URL.
     host = /^https?:$/.test(parsed.protocol) ? parsed.hostname || tab.url : tab.url;
   } catch { /* mantém o texto bruto */ }
 
   ui.targetHost.textContent = host;
   ui.targetTitle.textContent = tab?.title || '';
   if (tab?.favIconUrl && /^https?:/i.test(tab.favIconUrl)) {
+    ui.targetIcon.hidden = false;
     ui.targetIcon.src = tab.favIconUrl;
   } else {
     ui.targetIcon.hidden = true;
@@ -90,7 +104,7 @@ function renderSteps(step) {
 
 function renderSummary(summary) {
   if (!summary) return;
-  ui.resultFile.textContent = summary.fileName;
+  ui.resultFile.textContent = summary.fileName || '';
   ui.resultStats.innerHTML = '';
 
   const rows = [
@@ -103,21 +117,25 @@ function renderSummary(summary) {
   ];
 
   for (const [label, value] of rows) {
+    if (value === undefined || value === null) continue;
     const li = document.createElement('li');
     li.innerHTML = `${label}: <b></b>`;
     li.querySelector('b').textContent = String(value);
     ui.resultStats.appendChild(li);
   }
+
+  const panelUrl = summary.panelUrl || PANEL_URL;
+  ui.openPanelButton.href = panelUrl;
 }
 
 function render(state) {
   const isRunning = state.state === 'running';
+  const canFallback = Boolean(state.canFallbackDownload);
 
   ui.cloneButton.classList.toggle('is-busy', isRunning);
   ui.cloneButton.disabled = isRunning || blocked;
   ui.cloneLabel.textContent = isRunning ? 'Clonando…' : 'Clonar Página Atual';
 
-  // Concluído: o painel de resumo substitui a lista de etapas para o popup não ficar longo.
   show(ui.progressPanel, isRunning);
   show(ui.successPanel, state.state === 'done');
   show(ui.errorPanel, state.state === 'error');
@@ -127,15 +145,28 @@ function render(state) {
   ui.progressMessage.textContent = state.message || '';
   renderSteps(state.step);
 
-  if (state.state === 'done') renderSummary(state.summary);
+  if (state.state === 'done') {
+    ui.successTitle.textContent = state.message || 'Sucesso! Site salvo no seu Painel.';
+    renderSummary(state.summary);
+  }
 
   if (state.state === 'error') {
+    ui.errorTitle.textContent = canFallback
+      ? 'Falha ao enviar para o painel'
+      : 'Não foi possível clonar';
     ui.errorMessage.textContent = state.message || 'Erro desconhecido.';
+    show(ui.fallbackDownloadButton, canFallback);
+    show(ui.fallbackHint, canFallback);
+    ui.fallbackDownloadButton.disabled = fallbackBusy;
+    ui.fallbackDownloadButton.classList.toggle('is-busy', fallbackBusy);
+  } else {
+    show(ui.fallbackDownloadButton, false);
+    show(ui.fallbackHint, false);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Inicialização
+// Inicialização + eventos
 // ---------------------------------------------------------------------------
 
 async function init() {
@@ -162,7 +193,6 @@ async function init() {
     show(ui.blockedAlert, true);
   }
 
-  // Restaura o estado caso o popup tenha sido fechado durante uma clonagem em andamento.
   const state = await chrome.runtime.sendMessage({ type: 'WEB_CLONER_GET_STATE' }).catch(() => null);
   if (state) render(state);
 }
@@ -170,20 +200,58 @@ async function init() {
 ui.cloneButton.addEventListener('click', async () => {
   if (blocked || !activeTab) return;
 
-  render({ state: 'running', percent: 3, step: 'dom', message: 'Preparando a captura…' });
+  render({
+    state: 'running',
+    percent: 3,
+    step: 'dom',
+    message: 'Preparando a captura…',
+    canFallbackDownload: false
+  });
 
   const response = await chrome.runtime
     .sendMessage({ type: 'WEB_CLONER_START', tabId: activeTab.id })
     .catch((error) => ({ ok: false, error: error?.message }));
 
   if (!response?.ok) {
-    render({ state: 'error', percent: 0, step: 'error', message: response?.error || 'Falha ao iniciar a clonagem.' });
+    render({
+      state: 'error',
+      percent: 0,
+      step: 'error',
+      message: response?.error || 'Falha ao iniciar a clonagem.',
+      canFallbackDownload: false
+    });
+  }
+});
+
+ui.fallbackDownloadButton.addEventListener('click', async () => {
+  if (fallbackBusy) return;
+  fallbackBusy = true;
+  ui.fallbackDownloadButton.classList.add('is-busy');
+  ui.fallbackDownloadButton.disabled = true;
+  ui.fallbackDownloadButton.querySelector('.btn__label').textContent = 'Baixando…';
+
+  const response = await chrome.runtime
+    .sendMessage({ type: 'WEB_CLONER_FALLBACK_DOWNLOAD' })
+    .catch((error) => ({ ok: false, error: error?.message }));
+
+  fallbackBusy = false;
+  ui.fallbackDownloadButton.classList.remove('is-busy');
+  ui.fallbackDownloadButton.disabled = false;
+  ui.fallbackDownloadButton.querySelector('.btn__label').textContent = 'Baixar ZIP Manualmente';
+
+  if (response?.ok) {
+    ui.errorTitle.textContent = 'ZIP salvo localmente';
+    ui.errorMessage.textContent = `Download de emergência concluído: ${response.fileName}`;
+  } else {
+    ui.errorMessage.textContent =
+      response?.error || 'Não foi possível baixar o ZIP. Tente clonar novamente.';
   }
 });
 
 ui.resetButton.addEventListener('click', async () => {
   await chrome.runtime.sendMessage({ type: 'WEB_CLONER_RESET' }).catch(() => {});
-  render({ state: 'idle', percent: 0, step: '', message: '' });
+  fallbackBusy = false;
+  render({ state: 'idle', percent: 0, step: '', message: '', canFallbackDownload: false });
   show(ui.progressPanel, false);
 });
 

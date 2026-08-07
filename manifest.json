@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Web Cloner Avançado",
-  "version": "1.0.0",
-  "description": "Clona a interface estática (HTML, CSS, fontes e imagens) da aba atual e entrega tudo empacotado em um arquivo .zip.",
+  "version": "1.1.0",
+  "description": "Clona a interface estática da aba atual e envia o .zip para o Painel Web Cloner. Em caso de falha no servidor, permite download local de emergência.",
   "minimum_chrome_version": "116",
   "permissions": [
     "activeTab",
@@ -12,7 +12,9 @@
     "storage"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "<all_urls>",
+    "http://localhost:3000/*",
+    "http://127.0.0.1:3000/*"
   ],
   "background": {
     "service_worker": "background.js"

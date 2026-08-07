@@ -20,8 +20,10 @@ venv/
 tools/test/.profiles/
 *.log
 
-# Secrets
+# Secrets (nunca versionar)
 .env
+.env.local
+.env.*.local
 .env.*
 !.env.example
 credentials.json

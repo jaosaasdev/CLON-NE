@@ -1,28 +1,41 @@
 /**
  * background.js — Service worker (Manifest V3).
  *
- * Orquestra todo o pipeline de clonagem:
- *   popup  ->  injeta content.js  ->  recebe DOM + tokens  ->  baixa CSS/assets
- *          ->  reescreve caminhos ->  monta o .zip (JSZip) ->  chrome.downloads.download
+ * Orquestra o pipeline de clonagem:
+ *   popup  ->  content.js  ->  CSS/assets  ->  JSZip
+ *          ->  POST /api/save-clone (Painel Next.js)
+ *          ->  fallback: chrome.downloads.download se o painel falhar
  *
  * ------------------------------------------------------------------------------------
- * POR QUE OS DOWNLOADS ACONTECEM AQUI (e não no content.js)? — a "bypass" de CORS
+ * POR QUE OS FETCHES DE ASSETS ACONTECEM AQUI? — "bypass" de CORS
  * ------------------------------------------------------------------------------------
- * Um fetch disparado do content.js roda sob a origem da PÁGINA: qualquer CDN sem o
- * cabeçalho `Access-Control-Allow-Origin` bloquearia a resposta.
- * Já um fetch disparado do service worker roda sob a origem `chrome-extension://<id>` e,
- * como o manifest declara `host_permissions: ["<all_urls>"]`, o Chrome concede acesso
- * cross-origin privilegiado: a checagem de CORS simplesmente não é aplicada.
- * Não é um "hack" — é o mecanismo oficial de permissões de host das extensões.
- *
- * Quando ainda assim o download falha (404, timeout, servidor exigindo Referer/Origin,
- * hotlink protection), a regra de negócio é: NÃO quebrar. O token do asset é resolvido
- * para a URL absoluta original, de modo que o clone continue funcionando com internet.
+ * Fetch no content script roda sob a origem da PÁGINA (CORS restrito).
+ * Fetch no service worker roda sob chrome-extension://<id> + host_permissions,
+ * então o Chrome concede acesso cross-origin privilegiado.
  */
 
 'use strict';
 
 importScripts('libs/jszip.min.js');
+
+// ---------------------------------------------------------------------------
+// Configuração do Painel (troque ao publicar em produção)
+// ---------------------------------------------------------------------------
+
+/** Endpoint POST que recebe FormData { title, url, file }. */
+const API_URL = 'http://localhost:3000/api/save-clone';
+
+/** URL aberta pelo botão "Abrir Painel" no popup. */
+const PANEL_URL = 'http://localhost:3000/';
+
+/**
+ * Opcional: mesmo valor de CLONE_API_SECRET do dashboard/.env.local.
+ * Deixe vazio se o painel não exigir o header.
+ */
+const CLONE_API_SECRET = '';
+
+/** Timeout do upload (ZIPs grandes precisam de margem). */
+const UPLOAD_TIMEOUT_MS = 120000;
 
 // ---------------------------------------------------------------------------
 // Constantes
@@ -65,6 +78,12 @@ const BLOCKED_URL_PATTERNS = [
 let currentState = { state: 'idle', percent: 0, message: 'Pronto para clonar.', step: '' };
 let keepAliveTimer = null;
 let running = false;
+
+/**
+ * ZIP pronto em memória para o Plano B (download local).
+ * Mantido no service worker — chrome.storage não aguenta ZIPs grandes com segurança.
+ */
+let pendingFallbackZip = null;
 
 async function publish(patch) {
   currentState = { ...currentState, ...patch };
@@ -492,7 +511,7 @@ function replaceTokens(text, resolved, { escapeHtml }) {
 }
 
 // ---------------------------------------------------------------------------
-// Empacotamento e download
+// Empacotamento, upload ao painel e download de emergência
 // ---------------------------------------------------------------------------
 
 function buildZipFileName(pageUrl) {
@@ -508,22 +527,83 @@ function buildZipFileName(pageUrl) {
   return `clone-${slug}-${stamp}.zip`;
 }
 
+/** Converte o base64 do ZIP em Blob para montar o FormData do upload. */
+function base64ToBlob(base64, type = 'application/zip') {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type });
+}
+
+/**
+ * POST FormData { title, url, file } para o Painel Next.js.
+ * Valida response.ok e o JSON { success } — qualquer falha sobe para o Plano B.
+ */
+async function uploadCloneToPanel({ title, url, fileName, blob }) {
+  const form = new FormData();
+  form.append('title', title || 'Sem título');
+  form.append('url', url || '');
+  form.append('file', blob, fileName);
+
+  const headers = {};
+  if (CLONE_API_SECRET) headers['X-Clone-Secret'] = CLONE_API_SECRET;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(API_URL, {
+      method: 'POST',
+      body: form,
+      headers,
+      signal: controller.signal
+    });
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch {
+      /* corpo não-JSON (proxy, HTML de erro, etc.) */
+    }
+
+    if (!response.ok) {
+      const detail = payload?.error || `HTTP ${response.status}`;
+      throw new Error(`Painel respondeu com erro: ${detail}`);
+    }
+
+    if (payload && payload.success === false) {
+      throw new Error(payload.error || 'Upload rejeitado pelo painel.');
+    }
+
+    return payload || { success: true };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('Tempo esgotado ao enviar para o painel. Verifique se o servidor está no ar.');
+    }
+    // Failed to fetch / network offline / CORS / painel fora do ar
+    if (/Failed to fetch|NetworkError|Load failed|fetch/i.test(String(error?.message || error))) {
+      throw new Error(
+        `Não foi possível conectar ao painel (${API_URL}). Confirme se o Next.js está rodando.`
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function ensureOffscreenDocument() {
   if (await chrome.offscreen.hasDocument()) return;
   await chrome.offscreen.createDocument({
     url: 'offscreen.html',
     reasons: ['BLOBS'],
-    justification: 'Criar uma URL de Blob para o arquivo .zip gerado, já que URL.createObjectURL não existe no service worker.'
+    justification: 'Criar uma URL de Blob para o download de emergência do .zip, já que URL.createObjectURL não existe no service worker.'
   });
 }
 
 /**
- * Dispara o download do .zip.
- *
- * Service workers não possuem `URL.createObjectURL`. Duas estratégias, em ordem:
- *   1. Documento offscreen cria o blob: URL (melhor para arquivos grandes).
- *   2. Fallback: data: URL em base64 (funciona sem a permissão "offscreen",
- *      porém consome ~33% mais memória).
+ * PLANO B — download local via chrome.downloads.
+ * Usado somente quando o upload ao painel falha (ou o usuário pede manualmente).
  */
 async function triggerDownload(base64, filename) {
   try {
@@ -559,6 +639,14 @@ function revokeWhenFinished(downloadId, blobUrl) {
     chrome.offscreen.closeDocument().catch(() => {});
   };
   chrome.downloads.onChanged.addListener(listener);
+}
+
+async function runFallbackDownload() {
+  if (!pendingFallbackZip?.base64 || !pendingFallbackZip?.fileName) {
+    throw new Error('Não há ZIP disponível para download de emergência. Clone a página novamente.');
+  }
+  await triggerDownload(pendingFallbackZip.base64, pendingFallbackZip.fileName);
+  return pendingFallbackZip.fileName;
 }
 
 // ---------------------------------------------------------------------------
@@ -695,40 +783,76 @@ async function clonePage(tabId) {
     ].join('\n')
   );
 
-  await publish({ state: 'running', percent: 88, step: 'zip', message: 'Empacotando o arquivo .zip…' });
+  await publish({ state: 'running', percent: 88, step: 'zip', message: 'Gerando ZIP…' });
   const base64 = await zip.generateAsync(
     { type: 'base64', compression: 'DEFLATE', compressionOptions: { level: 6 } },
     (meta) => {
       if (Math.round(meta.percent) % 10 !== 0) return;
       publish({
         state: 'running',
-        percent: 88 + Math.round(meta.percent * 0.08),
+        percent: 88 + Math.round(meta.percent * 0.06),
         step: 'zip',
-        message: `Compactando… ${Math.round(meta.percent)}%`
+        message: `Gerando ZIP… ${Math.round(meta.percent)}%`
       });
     }
   );
 
-  await publish({ state: 'running', percent: 97, step: 'download', message: 'Enviando para os downloads…' });
   const fileName = buildZipFileName(payload.pageUrl);
-  await triggerDownload(base64, fileName);
-
   const sizeMb = (totalBytes / (1024 * 1024)).toFixed(1);
+  const summaryBase = {
+    fileName,
+    assetsOk: okCount,
+    assetsFailed: failCount,
+    sizeMb,
+    shadowRoots: payload.stats.shadowRoots,
+    canvases: payload.stats.canvases,
+    stylesheets: payload.cssParts.length,
+    panelUrl: PANEL_URL
+  };
+
+  // Guarda o ZIP em memória ANTES do upload — se o painel falhar, o Plano B ainda funciona.
+  pendingFallbackZip = { base64, fileName };
+
   await publish({
-    state: 'done',
-    percent: 100,
-    step: 'done',
-    message: `Download concluído: ${fileName}`,
-    summary: {
-      fileName,
-      assetsOk: okCount,
-      assetsFailed: failCount,
-      sizeMb,
-      shadowRoots: payload.stats.shadowRoots,
-      canvases: payload.stats.canvases,
-      stylesheets: payload.cssParts.length
-    }
+    state: 'running',
+    percent: 95,
+    step: 'upload',
+    message: 'Enviando para o Painel…'
   });
+
+  try {
+    const blob = base64ToBlob(base64);
+    await uploadCloneToPanel({
+      title: payload.pageTitle || tab.title || 'Sem título',
+      url: payload.pageUrl || tab.url,
+      fileName,
+      blob
+    });
+
+    // Sucesso no painel: limpa o fallback (não precisa mais do download local).
+    pendingFallbackZip = null;
+
+    await publish({
+      state: 'done',
+      percent: 100,
+      step: 'done',
+      message: 'Sucesso! Site salvo no seu Painel.',
+      canFallbackDownload: false,
+      summary: { ...summaryBase, uploaded: true }
+    });
+  } catch (uploadError) {
+    // PLANO B: mantém o ZIP e sinaliza a UI para oferecer "Baixar ZIP Manualmente".
+    console.warn('[Web Cloner] Upload ao painel falhou — fallback disponível.', uploadError);
+    await publish({
+      state: 'error',
+      percent: 100,
+      step: 'error',
+      message: uploadError?.message || 'Falha ao enviar para o painel.',
+      canFallbackDownload: true,
+      fileName,
+      summary: { ...summaryBase, uploaded: false }
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -739,7 +863,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || message.target === 'offscreen') return undefined;
 
   if (message.type === 'WEB_CLONER_GET_STATE') {
-    sendResponse(currentState);
+    sendResponse({
+      ...currentState,
+      canFallbackDownload: Boolean(pendingFallbackZip),
+      panelUrl: PANEL_URL
+    });
     return undefined;
   }
 
@@ -750,6 +878,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     running = true;
+    pendingFallbackZip = null;
     startKeepAlive();
     sendResponse({ ok: true });
 
@@ -760,7 +889,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           state: 'error',
           percent: 100,
           step: 'error',
-          message: error?.message || 'Erro inesperado durante a clonagem.'
+          message: error?.message || 'Erro inesperado durante a clonagem.',
+          canFallbackDownload: Boolean(pendingFallbackZip)
         });
       })
       .finally(() => {
@@ -771,8 +901,34 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return undefined;
   }
 
+  if (message.type === 'WEB_CLONER_FALLBACK_DOWNLOAD') {
+    runFallbackDownload()
+      .then((fileName) => {
+        sendResponse({ ok: true, fileName });
+        return publish({
+          ...currentState,
+          message: `ZIP salvo localmente: ${fileName}`,
+          fallbackDownloaded: true
+        });
+      })
+      .catch((error) => {
+        sendResponse({ ok: false, error: error?.message || String(error) });
+      });
+    return true; // resposta assíncrona
+  }
+
   if (message.type === 'WEB_CLONER_RESET') {
-    publish({ state: 'idle', percent: 0, step: '', message: 'Pronto para clonar.', summary: null });
+    pendingFallbackZip = null;
+    publish({
+      state: 'idle',
+      percent: 0,
+      step: '',
+      message: 'Pronto para clonar.',
+      summary: null,
+      canFallbackDownload: false,
+      fileName: null,
+      fallbackDownloaded: false
+    });
     sendResponse({ ok: true });
   }
 

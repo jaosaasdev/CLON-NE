@@ -61,8 +61,8 @@
           <li class="step" data-step="dom"><i></i><span>Analisando DOM</span></li>
           <li class="step" data-step="css"><i></i><span>Extraindo CSS e fontes</span></li>
           <li class="step" data-step="assets"><i></i><span>Baixando assets</span></li>
-          <li class="step" data-step="zip"><i></i><span>Empacotando ZIP</span></li>
-          <li class="step" data-step="download"><i></i><span>Download</span></li>
+          <li class="step" data-step="zip"><i></i><span>Gerando ZIP</span></li>
+          <li class="step" data-step="upload"><i></i><span>Enviando ao Painel</span></li>
         </ol>
       </section>
 
@@ -72,10 +72,19 @@
             <circle cx="12" cy="12" r="9" />
             <path d="m8.5 12.2 2.4 2.4 4.6 -5" />
           </svg>
-          <strong>Download concluído</strong>
+          <strong id="successTitle">Sucesso! Site salvo no seu Painel.</strong>
         </div>
         <code class="result__file" id="resultFile"></code>
         <ul class="stats" id="resultStats"></ul>
+        <a
+          class="btn btn--secondary"
+          id="openPanelButton"
+          href="http://localhost:3000/"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Abrir Painel
+        </a>
       </section>
 
       <section class="alert alert--error" id="errorPanel" hidden>
@@ -84,9 +93,16 @@
           <path d="M12 7.5v5.5" />
           <circle cx="12" cy="16.5" r="1" fill="currentColor" stroke="none" />
         </svg>
-        <div>
-          <strong>Não foi possível clonar</strong>
+        <div class="alert__body">
+          <strong id="errorTitle">Falha ao enviar para o painel</strong>
           <p id="errorMessage"></p>
+          <button class="btn btn--fallback" id="fallbackDownloadButton" type="button" hidden>
+            <span class="btn__spinner" aria-hidden="true"></span>
+            <span class="btn__label">Baixar ZIP Manualmente</span>
+          </button>
+          <p class="fallback-hint" id="fallbackHint" hidden>
+            O clone já está pronto — salve localmente enquanto o painel estiver offline.
+          </p>
         </div>
       </section>
 
